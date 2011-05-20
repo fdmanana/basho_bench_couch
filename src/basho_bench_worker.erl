@@ -1,0 +1,292 @@
+%% -------------------------------------------------------------------
+%%
+%% basho_bench: Benchmarking Suite
+%%
+%% Copyright (c) 2009-2010 Basho Techonologies
+%%
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
+%%
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
+%% under the License.    
+%%
+%% -------------------------------------------------------------------
+-module(basho_bench_worker).
+
+-behaviour(gen_server).
+
+%% API
+-export([start_link/2,
+         run/1,
+         stop/1]).
+
+%% gen_server callbacks
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2,
+         terminate/2, code_change/3]).
+
+-record(state, { id,
+                 keygen,
+                 valgen,
+                 driver,
+                 driver_state,
+                 ops,
+                 ops_len,
+                 rng_seed,
+                 parent_pid,
+                 worker_pid,
+                 sup_id}).
+
+-include("basho_bench.hrl").
+
+%% ====================================================================
+%% API
+%% ====================================================================
+
+start_link(SupChild, Id) ->
+    gen_server:start_link(?MODULE, [SupChild, Id], []).
+
+run(Pids) ->
+    [ok = gen_server:call(Pid, run) || Pid <- Pids],
+    ok.
+
+stop(Pids) ->
+    [ok = gen_server:call(Pid, stop) || Pid <- Pids],
+    ok.
+
+%% ====================================================================
+%% gen_server callbacks
+%% ====================================================================
+
+init([SupChild, Id]) ->
+    %% Setup RNG seed for worker sub-process to use; incorporate the ID of
+    %% the worker to ensure consistency in load-gen
+    %%
+    %% NOTE: If the worker process dies, this obviously introduces some entroy
+    %% into the equation since you'd be restarting the RNG all over.
+    process_flag(trap_exit, true),
+    {A1, A2, A3} = basho_bench_config:get(rng_seed),
+    RngSeed = {A1+Id, A2+Id, A3+Id},
+
+    %% Pull all config settings from environment
+    Driver  = basho_bench_config:get(driver),
+    Ops     = ops_tuple(),
+
+    %% Finally, initialize key and value generation. We pass in our ID to the
+    %% initialization to enable (optional) key/value space partitioning
+    KeyGen = basho_bench_keygen:new(basho_bench_config:get(key_generator), Id),
+    ValGen = basho_bench_valgen:new(basho_bench_config:get(value_generator), Id),
+
+    State = #state { id = Id, keygen = KeyGen, valgen = ValGen,
+                     driver = Driver,
+                     ops = Ops, ops_len = size(Ops),
+                     rng_seed = RngSeed,
+                     parent_pid = self(),
+                     sup_id = SupChild},
+
+    %% Use a dedicated sub-process to do the actual work. The work loop may need
+    %% to sleep or otherwise delay in a way that would be inappropriate and/or
+    %% inefficient for a gen_server. Furthermore, we want the loop to be as
+    %% tight as possible for peak load generation and avoid unnecessary polling
+    %% of the message queue.
+    %%
+    %% Link the worker and the sub-process to ensure that if either exits, the
+    %% other goes with it.
+    WorkerPid = spawn_link(fun() -> worker_init(State) end),
+    WorkerPid ! {init_driver, self()},
+    receive
+        driver_ready ->
+            ok
+    end,
+
+    %% If the system is marked as running this is a restart; queue up the run
+    %% message for this worker
+    case basho_bench_app:is_running() of
+        true ->
+            ?WARN("Restarting crashed worker.\n", []),
+            gen_server:cast(self(), run);
+        false ->
+            ok
+    end,
+
+    {ok, State#state { worker_pid = WorkerPid }}.
+
+handle_call(run, _From, State) ->
+    State#state.worker_pid ! run,
+    {reply, ok, State}.
+
+handle_cast(run, State) ->
+    State#state.worker_pid ! run,
+    {noreply, State}.
+
+handle_info({'EXIT', _Pid, Reason}, State) ->
+    case Reason of
+        normal ->
+            %% Clean shutdown of the worker; spawn a process to terminate this
+            %% process via the supervisor API and make sure it doesn't restart.
+            spawn(fun() -> stop_worker(State#state.sup_id) end),
+            {noreply, State};
+
+        _ ->
+            %% Worker process exited for some other reason; stop this process
+            %% as well so that everything gets restarted by the sup
+            {stop, normal, State}
+    end.
+
+terminate(_Reason, _State) ->
+    ok.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+
+
+%% ====================================================================
+%% Internal functions
+%% ====================================================================
+
+%%
+%% Stop a worker process via the supervisor and terminate the app
+%% if there are no workers remaining
+%%
+%% WARNING: Must run from a process other than the worker!
+%%
+stop_worker(SupChild) ->
+    ok = basho_bench_sup:stop_child(SupChild),
+    case basho_bench_sup:workers() of
+        [] ->
+            %% No more workers -- stop the system
+            basho_bench_app:stop();
+        _ ->
+            ok
+    end.
+
+%%
+%% Expand operations list into tuple suitable for weighted, random draw
+%%
+ops_tuple() ->
+    Ops = [lists:duplicate(Count, Op) || {Op, Count} <- basho_bench_config:get(operations)],
+    list_to_tuple(lists:flatten(Ops)).
+
+
+worker_init(State) ->
+    %% Trap exits from linked parent process; use this to ensure the driver
+    %% gets a chance to cleanup
+    process_flag(trap_exit, true),
+    random:seed(State#state.rng_seed),
+    worker_idle_loop(State).
+
+worker_idle_loop(State) ->
+    Driver = State#state.driver,
+    receive
+        {init_driver, Caller} ->
+            %% Spin up the driver implementation
+            case catch(Driver:new(State#state.id)) of
+                {ok, DriverState} ->
+                    Caller ! driver_ready,
+                    ok;
+                Error ->
+                    DriverState = undefined, % Make erlc happy
+                    ?FAIL_MSG("Failed to initialize driver ~p: ~p\n", [Driver, Error])
+            end,
+            worker_idle_loop(State#state { driver_state = DriverState });
+        run ->
+            case basho_bench_config:get(mode) of
+                max ->
+                    ?INFO("Starting max worker: ~p\n", [self()]),
+                    max_worker_run_loop(State);
+                {rate, Rate} ->
+                    %% Calculate mean interarrival time in in milliseconds. A
+                    %% fixed rate worker can generate (at max) only 1k req/sec.
+                    MeanArrival = 1000 / Rate,
+                    ?INFO("Starting ~w ms/req fixed rate worker: ~p\n", [MeanArrival, self()]),
+                    rate_worker_run_loop(State, 1 / MeanArrival)
+            end
+    end.
+
+worker_next_op(State) ->
+    Next = element(random:uniform(State#state.ops_len), State#state.ops),
+    Start = now(),
+    Result = (catch (State#state.driver):run(Next, State#state.keygen, State#state.valgen,
+                                             State#state.driver_state)),
+    ElapsedUs = timer:now_diff(now(), Start),
+    case Result of
+        {ok, DriverState} ->
+            %% Success
+            basho_bench_stats:op_complete(Next, ok, ElapsedUs),
+            {ok, State#state { driver_state = DriverState}};
+
+        {error, Reason, DriverState} ->
+            %% Driver encountered a recoverable error
+            basho_bench_stats:op_complete(Next, {error, Reason}, ElapsedUs),
+            {ok, State#state { driver_state = DriverState}};
+
+        {'EXIT', Reason} ->
+            %% Driver crashed, generate a crash error and terminate. This will take down
+            %% the corresponding worker which will get restarted by the appropriate supervisor.
+            basho_bench_stats:op_complete(Next, {error, crash}, ElapsedUs),
+
+            %% Give the driver a chance to cleanup
+            (catch (State#state.driver):terminate({'EXIT', Reason}, State#state.driver_state)),
+
+            ?DEBUG("Driver ~p crashed: ~p\n", [State#state.driver, Reason]),
+            crash;
+
+        {stop, Reason} ->
+            %% Driver (or something within it) has requested that this worker
+            %% terminate cleanly.
+            ?INFO("Driver ~p (~p) has requested stop: ~p\n", [State#state.driver, self(), Reason]),
+
+            %% Give the driver a chance to cleanup
+            (catch (State#state.driver):terminate(normal, State#state.driver_state)),
+
+            normal
+    end.
+
+needs_shutdown(State) ->
+    Parent = State#state.parent_pid,
+    receive
+        {'EXIT', Parent, _Reason} ->
+            %% Give the driver a chance to cleanup
+            (catch (State#state.driver):terminate(normal, State#state.driver_state)),
+            true
+    after 0 ->
+            false
+    end.
+
+
+max_worker_run_loop(State) ->
+    case worker_next_op(State) of
+        {ok, State2} ->
+            case needs_shutdown(State2) of
+                true ->
+                    ok;
+                false ->
+                    max_worker_run_loop(State2)
+            end;
+        ExitReason ->
+            exit(ExitReason)
+    end.
+
+rate_worker_run_loop(State, Lambda) ->
+    %% Delay between runs using exponentially distributed delays to mimic
+    %% queue.
+    timer:sleep(trunc(stats_rv:exponential(Lambda))),
+    case worker_next_op(State) of
+        {ok, State2} ->
+            case needs_shutdown(State2) of
+                true ->
+                    ok;
+                false ->
+                    rate_worker_run_loop(State2, Lambda)
+            end;
+        ExitReason ->
+            exit(ExitReason)
+    end.
