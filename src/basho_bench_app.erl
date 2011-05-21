@@ -40,10 +40,10 @@ start() ->
     %% Redirect all SASL logging into a text file
     application:load(sasl),
     application:set_env(sasl, sasl_error_logger, {file, "log.sasl.txt"}),
-    ok = application:start(sasl),
+    _ = application:start(sasl),
 
     %% Make sure crypto is available
-    ok = application:start(crypto),
+    _ = application:start(crypto),
     
     %% Start up our application -- mark it as permanent so that the node
     %% will be killed if we go down

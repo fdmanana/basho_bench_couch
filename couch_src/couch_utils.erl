@@ -13,11 +13,14 @@
 % License for the specific language governing permissions and limitations under
 % the License.
 
--module(couch_util).
+-module(couch_utils).
 
+-export([start_couch/1]).
 -export([get_value/2, get_value/3]).
 -export([json_encode/1, json_decode/1]).
 -export([to_list/1, to_binary/1]).
+
+-define(COUCH_DEV_INI_FILE, "etc/couchdb/default_dev.ini").
 
 
 get_value(Key, List) ->
@@ -69,3 +72,25 @@ to_list(V) when is_atom(V) ->
     atom_to_list(V);
 to_list(V) ->
     lists:flatten(io_lib:format("~p", [V])).
+
+
+start_couch(CouchDir) ->
+    CouchApps = [
+        "couchdb", "mochiweb", "ibrowse", "ejson", "snappy", "erlang-oauth"
+    ],
+    lists:foreach(
+        fun(App) ->
+            true = code:add_patha(filename:join([CouchDir, "src", App]))
+        end,
+        CouchApps),
+    {ok, _Pid} = couch_app:start(foo, [
+        filename:join([CouchDir, ?COUCH_DEV_INI_FILE])]),
+    case basho_bench_config:get(couch_test_db, nil) of
+    nil ->
+        ok;
+    DbName ->
+        couch_config:set("couchdb", "delayed_commits", "false"),
+        _ = couch_server:delete(list_to_binary(DbName), []),
+        {ok, Db} = couch_server:create(list_to_binary(DbName), []),
+        couch_db:close(Db)
+    end.

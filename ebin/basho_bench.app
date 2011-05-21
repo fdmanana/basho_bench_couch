@@ -21,9 +21,10 @@
              basho_bench_worker,
              basho_bench_valgen,
              % CouchDB specific files
-             couch_util,
+             couch_utils,
              couch_http_writes,
              couch_http_bulk_writes,
+             couch_int_writes,
              mochinum,
              mochijson2
              ]},

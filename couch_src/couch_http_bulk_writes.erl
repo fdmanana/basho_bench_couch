@@ -22,7 +22,7 @@
 
 -define(TIMEOUT, 30000).
 
--import(couch_util, [
+-import(couch_utils, [
     get_value/1, get_value/2,
     json_encode/1, json_decode/1,
     to_list/1, to_binary/1
@@ -85,7 +85,7 @@ run(put, _KeyGen, _ValueGen, State) ->
                     Error = get_value(<<"error">>, Result),
                     Msg = iolist_to_binary(
                         ["Error saving bulk saving doc `", Id, "`, error: ", Error]),
-                    ?ERROR("~s", Msg),
+                    ?ERROR("~s~n", [Msg]),
                     {error, Msg}
                 end
             end,

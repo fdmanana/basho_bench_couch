@@ -51,6 +51,13 @@ main(Configs) ->
             load_source_files(SourceDir)
     end,
 
+    case basho_bench_config:get(couch_source_dir, []) of
+        nil ->
+            ok;
+        CouchDir ->
+            couch_utils:start_couch(CouchDir)
+    end,
+
     %% Setup working directory for this test. All logs, stats, and config
     %% info will be placed here
     {ok, Cwd} = file:get_cwd(),

@@ -22,7 +22,7 @@
 
 -define(TIMEOUT, 30000).
 
--import(couch_util, [
+-import(couch_utils, [
     get_value/1, get_value/2,
     json_encode/1, json_decode/1,
     to_list/1, to_binary/1
