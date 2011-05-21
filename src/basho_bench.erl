@@ -52,7 +52,7 @@ main(Configs) ->
     end,
 
     case basho_bench_config:get(couch_source_dir, []) of
-        nil ->
+        [] ->
             ok;
         CouchDir ->
             couch_utils:start_couch(CouchDir)
