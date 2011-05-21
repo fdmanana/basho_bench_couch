@@ -25,6 +25,7 @@
              couch_http_writes,
              couch_http_bulk_writes,
              couch_int_writes,
+             couch_int_bulk_writes,
              mochinum,
              mochijson2
              ]},
