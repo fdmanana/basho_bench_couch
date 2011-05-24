@@ -28,7 +28,9 @@
 
 -record(state, {
     db_name,
-    doc
+    doc,
+    uuid = couch_uuids:new(),
+    counter = 1
 }).
 
 
@@ -56,25 +58,23 @@ new(_Id) ->
 
 run(put, _KeyGen, _ValueGen, #state{db_name = DbName, doc = {Doc0}} = State) ->
     {ok, Db} = couch_db:open_int(DbName, []),
-    Id = couch_uuids:new(),
+    Id = iolist_to_binary([State#state.uuid, "-", integer_to_list(State#state.counter)]),
     Doc = couch_doc:from_json_obj(
         {lists:keystore(<<"_id">>, 1, Doc0, {<<"_id">>, Id})}),
     try
         case couch_db:update_doc(Db, Doc, []) of
         {ok, _} ->
-            {ok, State};
+            {ok, State#state{counter = State#state.counter + 1}};
         Error ->
-            Msg = iolist_to_binary(
-                ["Error saving saving doc `", Id, "`, error: ", to_list(Error)]),
+            Msg = io_lib:format("Error saving saving doc `~s`: ~s", [Id, to_list(Error)]),
             ?ERROR("~s~n", [Msg]),
-            {error, Msg}
+            {error, Msg, State#state{counter = State#state.counter + 1}}
         end
     catch
     Tag:Err ->
-        Msg1 = iolist_to_binary(
-            ["Error saving saving doc `", Id, "`, error: ", to_list({Tag, Err})]),
+        Msg1 = io_lib:format("Error saving saving doc `~s`: ~s", [Id, to_list({Tag, Err})]),
         ?ERROR("~s~n", [Msg1]),
-        {error, Msg1}
+        {error, Msg1, State#state{counter = State#state.counter + 1}}
     after
         couch_db:close(Db)
     end.

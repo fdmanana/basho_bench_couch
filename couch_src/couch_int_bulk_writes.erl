@@ -28,7 +28,9 @@
 
 -record(state, {
     db_name,
-    docs
+    docs,
+    uuid = couch_uuids:new(),
+    counter = 1
 }).
 
 
@@ -56,13 +58,14 @@ new(_Id) ->
 
 run(put, _KeyGen, _ValueGen, #state{db_name = DbName, docs = Docs0} = State) ->
     {ok, Db} = couch_db:open_int(DbName, []),
-    Docs = lists:map(
-        fun({Doc0}) ->
-            Id = couch_uuids:new(),
-            couch_doc:from_json_obj(
-                {lists:keystore(<<"_id">>, 1, Doc0, {<<"_id">>, Id})})
+    {NewCounter, Docs} = lists:foldr(
+        fun({Doc0}, {C, Acc}) ->
+            Id = iolist_to_binary([State#state.uuid, "-", integer_to_list(C)]),
+            Doc = couch_doc:from_json_obj(
+                {lists:keystore(<<"_id">>, 1, Doc0, {<<"_id">>, Id})}),
+            {C + 1, [Doc | Acc]}
         end,
-        Docs0),
+        {State#state.counter, []}, Docs0),
     try
         case couch_db:update_docs(Db, Docs, []) of
         {ok, Results} ->
@@ -74,23 +77,21 @@ run(put, _KeyGen, _ValueGen, #state{db_name = DbName, docs = Docs0} = State) ->
                 end,
                 0, Results),
             case ErrorCount > 0 of
-            false ->
-                {ok, State};
             true ->
-                {error, to_binary([ErrorCount, " docupdate errors."])}
+                Msg = io_lib:format("~p doc update errors", [ErrorCount]),
+                ?ERROR("~s~n", [Msg]),
+                {error, Msg, State#state{counter = NewCounter}};
+            false ->
+                {ok, State#state{counter = NewCounter}}
             end;
         Error ->
-            Msg = iolist_to_binary(
-                ["Error saving saving docs: ", to_list(Error)]),
-            ?ERROR("~s~n", [Msg]),
-            {error, Msg}
+            ?ERROR("Error saving saving docs: ~s~n", [to_list(Error)])
         end
     catch
     Tag:Err ->
-        Msg1 = iolist_to_binary(
-            ["Error saving saving docs: ", to_list({Tag, Err})]),
+        Msg1 = io_lib:format("Error saving saving docs: ~s", [to_list({Tag, Err})]),
         ?ERROR("~s~n", [Msg1]),
-        {error, Msg1}
+        {error, Msg1, State#state{counter = NewCounter}}
     after
         couch_db:close(Db)
     end.
