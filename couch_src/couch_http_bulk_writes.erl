@@ -82,11 +82,15 @@ run(put, _KeyGen, _ValueGen, State) ->
                     Acc;
                 _ ->
                     Id = get_value(<<"id">>, Result),
-                    Error = get_value(<<"error">>, Result),
-                    Msg = iolist_to_binary(
-                        ["Error saving bulk saving doc `", Id, "`, error: ", Error]),
-                    ?ERROR("~s~n", [Msg]),
-                    {error, Msg}
+                    case get_value(<<"error">>, Result) of
+                    undefined ->
+                        Acc;
+                    Error ->
+                        Msg = iolist_to_binary(
+                            ["Error saving bulk saving doc `", Id, "`, error: ", Error]),
+                        ?ERROR("~s~n", [Msg]),
+                        {error, Msg}
+                    end
                 end
             end,
             {ok, State}, json_decode(Body));
